@@ -43,6 +43,7 @@ skills/
 **/skills/
 .claude/
 .codex/
+CLAUDE.md
 *_traces/
 traces/
 qa-artifacts/
