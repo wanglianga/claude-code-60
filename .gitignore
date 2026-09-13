@@ -1,7 +1,53 @@
-target/
-.playwright-cli/
+# Local secrets and credentials
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*credential*
+*secret*
+
+# Build and coverage output
+node_modules/
+dist/
+build/
+target/
+coverage/
+.coverage
+.nyc_output/
+
+# Caches, logs, temporary files, and local databases
+.cache/
+**/__pycache__/
+*.py[cod]
 *.log
+*.tmp
+*.temp
+tmp/
+temp/
+*.db
+*.sqlite*
+
+# Editor and OS files
 .idea/
 .vscode/
 .DS_Store
+
+# Local agent/session/QA artifacts
+memory/
+**/memory/
+skill/
+skills/
+**/skill/
+**/skills/
+.claude/
+.codex/
+*_traces/
+traces/
+qa-artifacts/
+qa-output/
+.playwright-cli/
+test-results/
+playwright-report/
