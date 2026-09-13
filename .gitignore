@@ -1,0 +1,7 @@
+target/
+.playwright-cli/
+.env
+*.log
+.idea/
+.vscode/
+.DS_Store

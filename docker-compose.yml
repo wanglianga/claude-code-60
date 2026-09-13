@@ -1,0 +1,37 @@
+# 城市垃圾分类驿站 —— 一键部署
+# 项目名由环境变量 COMPOSE_PROJECT_NAME 固定（平台注入），不要在此覆盖。
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: wastedb
+      POSTGRES_USER: waste
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-waste123}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U waste -d wastedb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 数据库不发布到宿主端口，仅在 compose 内部网络供 app 访问
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/wastedb
+      SPRING_DATASOURCE_USERNAME: waste
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-waste123}
+      JWT_SECRET: ${JWT_SECRET:-change-me-please-change-me-please-0123456789abcdef}
+      SERVER_PORT: 8080
+    ports:
+      # 仅应用服务发布到宿主（宿主端口由 CC_PUBLISH_PORT 指定）
+      - "${CC_PUBLISH_PORT}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db-data:

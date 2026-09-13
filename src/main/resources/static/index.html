@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>垃圾分类驿站 · 积分兑换与误投追踪</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f4f0; color: #2c3e2d; }
+  header { background: linear-gradient(135deg, #2e7d32, #66bb6a); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 18px; }
+  #userbar { font-size: 13px; display: flex; gap: 8px; align-items: center; }
+  #userbar button { background: rgba(255,255,255,.2); color: #fff; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+  nav { display: flex; flex-wrap: wrap; gap: 4px; background: #fff; padding: 8px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  nav button { border: none; background: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 14px; color: #456; }
+  nav button.active { background: #2e7d32; color: #fff; }
+  main { max-width: 1080px; margin: 18px auto; padding: 0 14px; }
+  .card { background: #fff; border-radius: 10px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+  .card h2 { font-size: 16px; margin-bottom: 12px; color: #2e7d32; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { color: #678; font-weight: 600; }
+  input, select, textarea { padding: 7px 9px; border: 1px solid #ccd; border-radius: 6px; font-size: 14px; }
+  button.act { background: #2e7d32; color: #fff; border: none; padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  button.act.sm { padding: 3px 9px; font-size: 12px; }
+  button.warn { background: #c62828; }
+  button.gray { background: #90a4ae; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #e8f5e9; color: #2e7d32; }
+  .tag.red { background: #ffebee; color: #c62828; }
+  .tag.orange { background: #fff3e0; color: #ef6c00; }
+  .tag.blue { background: #e3f2fd; color: #1565c0; }
+  #toast { position: fixed; top: 14px; right: 14px; z-index: 9; max-width: 380px; }
+  .toast { background: #323232; color: #fff; padding: 10px 16px; border-radius: 8px; margin-bottom: 8px; font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+  .toast.err { background: #c62828; }
+  .muted { color: #90a4ae; font-size: 12px; }
+  .acct { cursor: pointer; color: #1565c0; text-decoration: underline; font-size: 12px; margin-right: 8px; }
+  pre { background: #f5f7f5; padding: 10px; border-radius: 6px; font-size: 12px; overflow: auto; max-height: 420px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌿 垃圾分类驿站 · 积分兑换与误投追踪</h1>
+  <div id="userbar"></div>
+</header>
+<nav id="nav" style="display:none"></nav>
+<main id="main"></main>
+<div id="toast"></div>
+<script>
+let token = localStorage.getItem('token') || '';
+let me = JSON.parse(localStorage.getItem('me') || 'null');
+const TABS = [
+  ['disposal','投放登记'], ['review','复核任务'], ['mall','积分商城'], ['points','我的积分'],
+  ['events','事件中心'], ['collection','清运'], ['appeal','申诉'], ['campaign','宣传活动'],
+  ['report','月度报告'], ['policy','政策对比']
+];
+const $ = s => document.querySelector(s);
+const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function toast(msg, err) {
+  const d = document.createElement('div');
+  d.className = 'toast' + (err ? ' err' : '');
+  d.textContent = msg;
+  $('#toast').appendChild(d);
+  setTimeout(() => d.remove(), 4200);
+}
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch('/api' + path, opts);
+  if (res.status === 204) return null;
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+  return body;
+}
+
+function renderUserbar() {
+  const bar = $('#userbar');
+  if (!me) { bar.innerHTML = '<span>未登录</span>'; return; }
+  bar.innerHTML = `<span>${esc(me.displayName)}（${me.role}） · 积分 <b>${me.pointsBalance}</b></span>
+    <button onclick="logout()">退出</button>`;
+}
+
+function logout() { token=''; me=null; localStorage.clear(); location.reload(); }
+
+async function login(u, p) {
+  try {
+    const r = await api('/auth/login', {method:'POST', body: JSON.stringify({username:u, password:p})});
+    token = r.token; me = r.user;
+    localStorage.setItem('token', token); localStorage.setItem('me', JSON.stringify(me));
+    location.reload();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderLogin() {
+  $('#nav').style.display = 'none';
+  $('#main').innerHTML = `<div class="card" style="max-width:420px;margin:40px auto">
+    <h2>登录</h2>
+    <div class="row"><input id="u" placeholder="用户名" style="flex:1"></div>
+    <div class="row"><input id="p" type="password" placeholder="密码" style="flex:1"></div>
+    <button class="act" onclick="login($('#u').value,$('#p').value)">登录</button>
+    <p class="muted" style="margin-top:14px">测试账号（点击填充）：</p>
+    <p style="margin-top:6px">
+      <span class="acct" onclick="login('resident1','Resident@123')">居民·张阿姨</span>
+      <span class="acct" onclick="login('resident2','Resident@123')">居民·李大爷(老人)</span>
+      <span class="acct" onclick="login('resident3','Resident@123')">居民·李小哥</span>
+      <span class="acct" onclick="login('resident5','Resident@123')">居民·赵先生(违规)</span><br>
+      <span class="acct" onclick="login('supervisor1','Supervisor@123')">督导员·陈督导</span>
+      <span class="acct" onclick="login('property1','Property@123')">物业·王经理</span>
+      <span class="acct" onclick="login('collector1','Collector@123')">清运·赵师傅</span>
+      <span class="acct" onclick="login('governance1','Governance@123')">社区·周主任</span>
+      <span class="acct" onclick="login('admin','Admin@123')">管理员</span>
+    </p></div>`;
+}
+
+let currentTab = 'disposal';
+function renderNav() {
+  $('#nav').style.display = 'flex';
+  $('#nav').innerHTML = TABS.map(([k,n]) =>
+    `<button class="${k===currentTab?'active':''}" onclick="go('${k}')">${n}</button>`).join('');
+}
+async function go(tab) { currentTab = tab; renderNav(); await VIEWS[tab](); }
+
+const CAT = {KITCHEN:'厨余', RECYCLABLE:'可回收', HAZARDOUS:'有害', OTHER:'其他'};
+const ISSUE = {PLASTIC_IN_KITCHEN:'塑料袋混入厨余', BATTERY_IN_OTHER:'电池混入其他垃圾',
+  CARDBOARD_NOT_FLATTENED:'纸箱未压扁', CONTAINER_NOT_CLEANED:'餐盒未清洗', OBVIOUS_MISSORT:'明显误投'};
+const EVT = {MISSORT_RATE_HIGH:'误投率升高', REVIEW_SLOW:'复核超时', OVERFLOW:'桶点满溢',
+  TRUCK_LATE:'清运车迟到', APPEAL_FILED:'居民申诉', WEIGH_ANOMALY:'称重异常'};
+const tag = (t, cls='') => `<span class="tag ${cls}">${t}</span>`;
+const stTag = s => ({PENDING:tag('待处理','orange'), CONFIRMED:tag('已确认','red'), REJECTED:tag('已驳回','blue'),
+  OPEN:tag('未处理','red'), ACKNOWLEDGED:tag('处理中','orange'), RESOLVED:tag('已解决'),
+  FULFILLED:tag('已核销'), CANCELLED:tag('已取消','blue'), APPROVED:tag('已通过'),
+  RECORDED:tag('已记录'), UNDER_REVIEW:tag('复核中','orange')}[s] || tag(s));
+
+const VIEWS = {
+async disposal() {
+  const [points, residents] = await Promise.all([
+    api('/bucket-points'),
+    (me.role==='SUPERVISOR'||me.role==='PROPERTY'||me.role==='ADMIN') ? api('/users?role=RESIDENT') : Promise.resolve([])
+  ]);
+  const mine = await api('/disposals/mine');
+  $('#main').innerHTML = `<div class="card"><h2>登记投放${me.role!=='RESIDENT'?'（可代录）':''}</h2>
+    <div class="row">
+      ${residents.length?`<select id="d-user"><option value="">本人投放</option>${residents.map(r=>`<option value="${r.id}">代录:${esc(r.displayName)}${r.elderly?'(老人)':''}</option>`).join('')}</select>`:''}
+      <select id="d-point">${points.filter(p=>p.status==='ACTIVE').map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <select id="d-cat">${Object.entries(CAT).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
+      <input id="d-weight" type="number" step="0.1" min="0.1" placeholder="重量kg" style="width:90px">
+      <label><input id="d-bag" type="checkbox"> 已破袋</label>
+      <label><input id="d-missort" type="checkbox"> 明显误投</label>
+    </div>
+    <div class="row">
+      <select id="d-issue"><option value="">无识别问题</option>${Object.entries(ISSUE).filter(([k])=>k!=='OBVIOUS_MISSORT').map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
+      <select id="d-source"><option value="SUPERVISOR">督导员识别</option><option value="CAMERA">摄像头识别</option></select>
+      <button class="act" onclick="submitDisposal()">提交投放</button>
+    </div></div>
+  <div class="card"><h2>我的投放记录</h2><table><tr><th>时间</th><th>桶点</th><th>类别</th><th>重量</th><th>积分</th><th>状态</th></tr>
+    ${mine.slice(0,15).map(d=>`<tr><td>${d.disposedAt}</td><td>${esc(d.bucketPointName)}</td><td>${CAT[d.category]}</td>
+      <td>${d.weightKg}kg</td><td>${d.pointsAwarded}</td><td>${stTag(d.status)}${d.proxyEntry?tag('代录','blue'):''}</td></tr>`).join('')}
+    </table></div>`;
+},
+async review() {
+  const tasks = await api('/review-tasks');
+  const all = await api('/review-tasks/all').catch(()=>[]);
+  $('#main').innerHTML = `<div class="card"><h2>待复核任务（${tasks.length}）</h2>
+    <table><tr><th>#</th><th>问题</th><th>来源</th><th>居民</th><th>类别/重量</th><th>截止</th><th>操作</th></tr>
+    ${tasks.map(t=>`<tr><td>${t.id}</td><td>${ISSUE[t.issueType]||t.issueType}</td><td>${t.source==='CAMERA'?'摄像头':'督导员'}</td>
+      <td>${esc(t.disposal.userName)}</td><td>${CAT[t.disposal.category]} ${t.disposal.weightKg}kg</td>
+      <td>${t.dueAt}</td><td>
+        <button class="act sm" onclick="completeTask(${t.id},true,'EDUCATION')">确认·教育</button>
+        <button class="act sm warn" onclick="completeTask(${t.id},true,'DEDUCT')">确认·扣分</button>
+        <button class="act sm gray" onclick="completeTask(${t.id},false)">误报</button></td></tr>`).join('') || '<tr><td colspan=7 class=muted>暂无待复核任务</td></tr>'}
+    </table></div>
+  <div class="card"><h2>全部复核记录</h2><table><tr><th>#</th><th>问题</th><th>居民</th><th>状态</th><th>处理</th><th>复核人</th></tr>
+    ${all.slice(-20).reverse().map(t=>`<tr><td>${t.id}</td><td>${ISSUE[t.issueType]||t.issueType}</td><td>${esc(t.disposal.userName)}</td>
+      <td>${stTag(t.status)}</td><td>${t.action||'-'}</td><td>${esc(t.reviewerName||'-')}</td></tr>`).join('')}
+    </table></div>`;
+},
+async mall() {
+  const products = await api('/products');
+  const orders = await api('/redemptions/mine');
+  const pending = (me.role==='PROPERTY'||me.role==='ADMIN') ? await api('/redemptions/pending') : [];
+  $('#main').innerHTML = `<div class="card"><h2>积分商城</h2>
+    <table><tr><th>商品</th><th>类型</th><th>积分</th><th>库存</th><th>限购(人/家·月)</th><th>有效期</th><th></th></tr>
+    ${products.map(p=>`<tr><td>${esc(p.name)}</td><td>${p.category==='SERVICE'?'社区服务':'实物'}</td><td>${p.costPoints}</td>
+      <td>${p.stock}</td><td>${p.perUserMonthlyLimit}/${p.perFamilyMonthlyLimit}</td>
+      <td>${p.validTo?p.validTo.slice(0,10):'长期'} ${p.expired?tag('已过期','red'):''}</td>
+      <td><button class="act sm" onclick="redeem(${p.id},'${esc(p.name)}')">兑换</button></td></tr>`).join('')}
+    </table></div>
+  ${pending.length?`<div class="card"><h2>待核销订单（物业）</h2><table><tr><th>单号</th><th>居民</th><th>商品</th><th>数量</th><th>积分</th><th></th></tr>
+    ${pending.map(o=>`<tr><td>${o.orderNo}</td><td>${esc(o.userName)}</td><td>${esc(o.productName)}</td><td>${o.quantity}</td>
+      <td>${o.pointsSpent}</td><td><button class="act sm" onclick="fulfill(${o.id})">核销</button></td></tr>`).join('')}</table></div>`:''}
+  <div class="card"><h2>我的兑换记录</h2><table><tr><th>单号</th><th>商品</th><th>数量</th><th>积分</th><th>状态</th><th></th></tr>
+    ${orders.map(o=>`<tr><td>${o.orderNo}</td><td>${esc(o.productName)}</td><td>${o.quantity}</td><td>${o.pointsSpent}</td>
+      <td>${stTag(o.status)}</td><td>${o.status==='PENDING'?`<button class="act sm gray" onclick="cancelOrder(${o.id})">取消</button>`:''}</td></tr>`).join('') || '<tr><td colspan=6 class=muted>暂无兑换</td></tr>'}
+    </table></div>`;
+},
+async points() {
+  const [p, txs, violations] = await Promise.all([api('/points/me'), api('/points/transactions'), api('/points/violations')]);
+  $('#main').innerHTML = `<div class="card"><h2>我的积分</h2>
+    <p style="font-size:26px;color:#2e7d32"><b>${p.balance}</b> 分</p>
+    <p class="muted" style="margin-top:6px">家庭共享池共 ${p.familyTotal} 分：${p.familyMembers.map(m=>`${esc(m.name)} ${m.balance}分`).join(' · ')}</p></div>
+  ${violations.length?`<div class="card"><h2>违规与教育提醒</h2><table><tr><th>时间</th><th>级别</th><th>扣分</th><th>内容</th></tr>
+    ${violations.map(v=>`<tr><td>${v.createdAt}</td><td>${v.level==='EDUCATION'?tag('教育提醒','blue'):tag('违规','red')}</td>
+      <td>${v.pointsDeducted}</td><td>${esc(v.message)}</td></tr>`).join('')}</table></div>`:''}
+  <div class="card"><h2>积分流水</h2><table><tr><th>时间</th><th>类型</th><th>变动</th><th>余额</th><th>说明</th></tr>
+    ${txs.map(t=>`<tr><td>${t.createdAt}</td><td>${t.type}</td>
+      <td style="color:${t.delta>=0?'#2e7d32':'#c62828'}">${t.delta>=0?'+':''}${t.delta}</td><td>${t.balanceAfter}</td><td>${esc(t.note||'')}</td></tr>`).join('')}
+    </table></div>`;
+},
+async events() {
+  const events = await api('/events');
+  const staff = me.role!=='RESIDENT';
+  $('#main').innerHTML = `<div class="card"><h2>桶点事件中心 ${staff?'<button class="act sm" onclick="runCheck()">手动巡检</button>':''}</h2>
+    <table><tr><th>#</th><th>类型</th><th>标题</th><th>详情</th><th>参与方</th><th>状态</th>${staff?'<th>操作</th>':''}</tr>
+    ${events.map(e=>`<tr><td>${e.id}</td><td>${tag(EVT[e.type]||e.type,'orange')}</td><td>${esc(e.title)}</td>
+      <td style="max-width:280px">${esc(e.detail||'')}</td>
+      <td>${(e.participants||[]).map(p=>`${esc(p.userName)}`).join('、')}</td><td>${stTag(e.status)}</td>
+      ${staff?`<td>${e.status!=='RESOLVED'?`<button class="act sm" onclick="resolveEvent(${e.id})">办结</button>`:''}</td>`:''}</tr>`).join('') || '<tr><td colspan=7 class=muted>暂无事件</td></tr>'}
+    </table></div>`;
+},
+async collection() {
+  const [points, records] = await Promise.all([api('/bucket-points'), api('/collections').catch(()=>[])]);
+  const staff = ['COLLECTOR','PROPERTY','ADMIN'].includes(me.role);
+  $('#main').innerHTML = `${staff?`<div class="card"><h2>清运排班</h2><div class="row">
+      <select id="c-point">${points.filter(p=>p.status==='ACTIVE').map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <input id="c-truck" placeholder="车牌号" value="沪A-10086">
+      <input id="c-time" type="datetime-local">
+      <button class="act" onclick="scheduleCollection()">排班</button></div></div>`:''}
+  <div class="card"><h2>清运记录</h2><table><tr><th>#</th><th>桶点</th><th>车牌</th><th>计划到达</th><th>实际到达</th><th>称重/应收</th><th>异常</th>${staff?'<th></th>':''}</tr>
+    ${records.map(c=>`<tr><td>${c.id}</td><td>${esc(c.bucketPointName)}</td><td>${esc(c.truckNo)}</td><td>${c.scheduledAt}</td>
+      <td>${c.arrivedAt||tag('未到','red')}</td><td>${c.weightKg??'-'} / ${c.expectedWeightKg??'-'} kg</td>
+      <td>${c.anomaly?tag('称重异常','red'):''}</td>
+      ${staff?`<td>${!c.arrivedAt?`<button class="act sm" onclick="arrive(${c.id})">到达称重</button>`:''}</td>`:''}</tr>`).join('') || '<tr><td colspan=8 class=muted>暂无记录</td></tr>'}
+    </table></div>`;
+},
+async appeal() {
+  const mine = await api('/appeals/mine');
+  const txs = await api('/points/transactions');
+  const deducts = txs.filter(t=>t.type==='REVIEW_DEDUCT');
+  const pending = ['GOVERNANCE','ADMIN'].includes(me.role) ? await api('/appeals/pending') : [];
+  $('#main').innerHTML = `<div class="card"><h2>发起申诉（针对复核扣分）</h2><div class="row">
+      <select id="a-tx">${deducts.map(t=>`<option value="${t.id}">流水#${t.id} ${t.delta}分 ${t.createdAt.slice(0,10)}</option>`).join('')}</select>
+      <input id="a-reason" placeholder="申诉理由" style="flex:1;min-width:200px">
+      <button class="act" onclick="fileAppeal()">提交申诉</button></div></div>
+  ${pending.length?`<div class="card"><h2>待处理申诉（社区治理）</h2><table><tr><th>#</th><th>居民</th><th>理由</th><th>操作</th></tr>
+    ${pending.map(a=>`<tr><td>${a.id}</td><td>${esc(a.userName)}</td><td>${esc(a.reason)}</td>
+      <td><button class="act sm" onclick="handleAppeal(${a.id},true)">通过并返还</button>
+          <button class="act sm warn" onclick="handleAppeal(${a.id},false)">驳回</button></td></tr>`).join('')}</table></div>`:''}
+  <div class="card"><h2>我的申诉</h2><table><tr><th>#</th><th>流水</th><th>理由</th><th>状态</th><th>处理意见</th></tr>
+    ${mine.map(a=>`<tr><td>${a.id}</td><td>#${a.pointsTransactionId}</td><td>${esc(a.reason)}</td>
+      <td>${stTag(a.status)}</td><td>${esc(a.handleNote||'-')}</td></tr>`).join('') || '<tr><td colspan=5 class=muted>暂无申诉</td></tr>'}
+    </table></div>`;
+},
+async campaign() {
+  const campaigns = await api('/campaigns');
+  $('#main').innerHTML = `<div class="card"><h2>社区宣传活动</h2>
+    <table><tr><th>活动</th><th>时间</th><th>名额</th><th>报名/到场</th><th>奖励</th><th></th></tr>
+    ${campaigns.map(c=>`<tr><td>${esc(c.title)}<br><span class=muted>${esc(c.description||'')}</span></td>
+      <td>${c.startAt.slice(0,10)} ~ ${c.endAt.slice(0,10)}</td><td>${c.capacity}</td>
+      <td>${c.signupCount}/${c.attendedCount}</td><td>${c.pointsReward}分</td>
+      <td><button class="act sm" onclick="signup(${c.id})">报名</button></td></tr>`).join('')}
+    </table></div>`;
+},
+async report() {
+  const month = new Date().toISOString().slice(0,7);
+  const r = await api('/reports/monthly?month=' + month).catch(e => ({error: e.message}));
+  $('#main').innerHTML = `<div class="card"><h2>月度治理报告（${r.month||month}）</h2>
+    ${r.error?`<p class=muted>${esc(r.error)}（需要物业/社区治理/管理员账号）</p>`:`
+    <div class="row">
+      <div class="card" style="flex:1;margin:0"><b>${r.disposal.count}</b><br><span class=muted>投放次数</span></div>
+      <div class="card" style="flex:1;margin:0"><b>${(r.disposal.missortRate*100).toFixed(1)}%</b><br><span class=muted>误投率</span></div>
+      <div class="card" style="flex:1;margin:0"><b>${r.points.awarded}</b><br><span class=muted>积分发放</span></div>
+      <div class="card" style="flex:1;margin:0"><b>${r.redemption.pointsCost}</b><br><span class=muted>兑换成本(分)</span></div>
+      <div class="card" style="flex:1;margin:0"><b>${r.collection.weightKg}</b><br><span class=muted>清运量kg</span></div>
+    </div>
+    <h2 style="margin-top:14px">楼栋维度</h2>
+    <table><tr><th>楼栋</th><th>投放</th><th>误投</th><th>误投率</th><th>重量kg</th><th>活跃居民</th></tr>
+    ${r.buildings.map(b=>`<tr><td>${b.building}</td><td>${b.disposals}</td><td>${b.missorts}</td>
+      <td>${(b.missortRate*100).toFixed(1)}%</td><td>${b.weightKg}</td><td>${b.activeResidents}</td></tr>`).join('')}</table>
+    <h2 style="margin-top:14px">治理建议</h2>
+    <ul>${r.suggestions.map(s=>`<li style="margin:4px 0 4px 20px">${esc(s)}</li>`).join('')||'<li class=muted>暂无</li>'}</ul>`}
+    </div>`;
+},
+async policy() {
+  const policies = await api('/policies');
+  $('#main').innerHTML = `<div class="card"><h2>政策前后对比（撤桶并点 / 定时投放 / 积分活动）</h2>
+    ${policies.map(p=>`<div class="row" style="border-bottom:1px solid #eee;padding:8px 0">
+      <div style="flex:1"><b>${esc(p.name)}</b> ${tag(p.type)}<br><span class=muted>${esc(p.description||'')} · 起始 ${p.startDate}</span></div>
+      <button class="act sm" onclick="comparePolicy(${p.id})">对比前后30天</button></div>`).join('')}
+    <pre id="cmp" style="margin-top:10px">点击上方按钮查看对比结果</pre></div>`;
+}
+};
+
+async function submitDisposal() {
+  try {
+    const issue = $('#d-issue').value;
+    const body = {
+      bucketPointId: +$('#d-point').value, category: $('#d-cat').value,
+      weightKg: +$('#d-weight').value, bagBroken: $('#d-bag').checked,
+      obviousMissort: $('#d-missort').checked, source: $('#d-source').value,
+      detectedIssues: issue ? [issue] : []
+    };
+    const uid = $('#d-user') && $('#d-user').value;
+    if (uid) body.userId = +uid;
+    const r = await api('/disposals', {method:'POST', body: JSON.stringify(body)});
+    toast(`投放成功，获得 ${r.pointsAwarded} 积分` + (r.status==='UNDER_REVIEW'?'（待复核）':''));
+    VIEWS.disposal();
+  } catch (e) { toast(e.message, true); }
+}
+async function completeTask(id, confirmed, action) {
+  try {
+    await api(`/review-tasks/${id}/complete`, {method:'POST', body: JSON.stringify({confirmed, action: action||'NONE'})});
+    toast('复核完成'); VIEWS.review();
+  } catch (e) { toast(e.message, true); }
+}
+async function redeem(id, name) {
+  try {
+    const r = await api('/redemptions', {method:'POST', body: JSON.stringify({productId:id, quantity:1})});
+    toast(`兑换成功：${name}，订单 ${r.orderNo}`); VIEWS.mall();
+  } catch (e) { toast(e.message, true); }
+}
+async function fulfill(id) { try { await api(`/redemptions/${id}/fulfill`, {method:'POST'}); toast('已核销'); VIEWS.mall(); } catch(e){ toast(e.message,true);} }
+async function cancelOrder(id) { try { await api(`/redemptions/${id}/cancel`, {method:'POST'}); toast('已取消并退回积分'); VIEWS.mall(); } catch(e){ toast(e.message,true);} }
+async function resolveEvent(id) { try { await api(`/events/${id}/resolve`, {method:'POST'}); toast('事件已办结'); VIEWS.events(); } catch(e){ toast(e.message,true);} }
+async function runCheck() { try { const r = await api('/events/check', {method:'POST'}); toast(`巡检完成，新事件 ${r.length} 个`); VIEWS.events(); } catch(e){ toast(e.message,true);} }
+async function scheduleCollection() {
+  try {
+    await api('/collections/schedule', {method:'POST', body: JSON.stringify({
+      bucketPointId:+$('#c-point').value, truckNo:$('#c-truck').value, scheduledAt:$('#c-time').value+':00+08:00'})});
+    toast('已排班'); VIEWS.collection();
+  } catch(e){ toast(e.message,true); }
+}
+async function arrive(id) {
+  const w = prompt('称重 kg：', '100'); if (!w) return;
+  try { await api(`/collections/${id}/arrive`, {method:'POST', body: JSON.stringify({weightKg:+w})}); toast('已登记'); VIEWS.collection(); }
+  catch(e){ toast(e.message,true); }
+}
+async function fileAppeal() {
+  try {
+    await api('/appeals', {method:'POST', body: JSON.stringify({pointsTransactionId:+$('#a-tx').value, reason:$('#a-reason').value})});
+    toast('申诉已提交'); VIEWS.appeal();
+  } catch(e){ toast(e.message,true); }
+}
+async function handleAppeal(id, approve) {
+  try { await api(`/appeals/${id}/handle`, {method:'POST', body: JSON.stringify({approve, note: approve?'核实为误扣':'证据充分'})}); toast('已处理'); VIEWS.appeal(); }
+  catch(e){ toast(e.message,true); }
+}
+async function signup(id) { try { await api(`/campaigns/${id}/signup`, {method:'POST'}); toast('报名成功'); VIEWS.campaign(); } catch(e){ toast(e.message,true); } }
+async function comparePolicy(id) {
+  try { const r = await api(`/policies/${id}/compare?days=30`); $('#cmp').textContent = JSON.stringify(r, null, 2); }
+  catch(e){ toast(e.message,true); }
+}
+
+(async function init() {
+  if (!me) { renderUserbar(); renderLogin(); return; }
+  try { me = await api('/auth/me'); localStorage.setItem('me', JSON.stringify(me)); }
+  catch (e) { logout(); return; }
+  renderUserbar(); renderNav(); VIEWS.disposal();
+})();
+</script>
+</body>
+</html>
