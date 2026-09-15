@@ -2,6 +2,7 @@ package com.community.waste.repo;
 
 import com.community.waste.model.RedemptionOrder;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -31,4 +32,14 @@ public interface RedemptionOrderRepo extends JpaRepository<RedemptionOrder, Long
 
     @Query("SELECT COALESCE(SUM(o.pointsSpent),0) FROM RedemptionOrder o WHERE o.createdAt >= :from AND o.createdAt < :to AND o.status <> 'CANCELLED'")
     long sumPointsSpentByRange(@Param("from") OffsetDateTime from, @Param("to") OffsetDateTime to);
+
+    /** 条件流转：仅 PENDING 可核销，返回 0 表示已被处理。 */
+    @Modifying(flushAutomatically = true)
+    @Query("UPDATE RedemptionOrder o SET o.status = 'FULFILLED', o.fulfilledAt = :now WHERE o.id = :id AND o.status = 'PENDING'")
+    int fulfillIfPending(@Param("id") Long id, @Param("now") OffsetDateTime now);
+
+    /** 条件流转：仅 PENDING 可取消，返回 0 表示已被处理（防重复退库存/退款）。 */
+    @Modifying(flushAutomatically = true)
+    @Query("UPDATE RedemptionOrder o SET o.status = 'CANCELLED' WHERE o.id = :id AND o.status = 'PENDING'")
+    int cancelIfPending(@Param("id") Long id);
 }

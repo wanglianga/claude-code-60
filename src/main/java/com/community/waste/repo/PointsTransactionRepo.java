@@ -16,6 +16,9 @@ public interface PointsTransactionRepo extends JpaRepository<PointsTransaction, 
 
     List<PointsTransaction> findByRefTypeAndRefId(String refType, Long refId);
 
+    /** 退款幂等守卫：同一业务对象的某类流水是否已存在。 */
+    boolean existsByRefTypeAndRefIdAndType(String refType, Long refId, PointsTransaction.TxType type);
+
     @Query("SELECT COALESCE(SUM(t.delta), 0) FROM PointsTransaction t WHERE t.type = :type AND t.createdAt >= :from AND t.createdAt < :to")
     long sumDeltaByTypeAndRange(@Param("type") PointsTransaction.TxType type,
                                 @Param("from") OffsetDateTime from,

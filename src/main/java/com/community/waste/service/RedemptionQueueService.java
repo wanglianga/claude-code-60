@@ -15,6 +15,13 @@ import java.util.*;
 
 /**
  * 兑换库存联动：缺货预约排队、供应商到货 FIFO 分配、到期未领自动回滚、替代商品领取、采购建议。
+ *
+ * 并发原子性约定（围绕商品库存，同一事务内）：
+ * - 商品一律通过 {@link ProductRepo#findByIdForUpdate} 行锁读取，库存与队列在锁内重读；
+ * - 库存变动用条件扣减（UPDATE ... WHERE stock >= qty），库存不足时仅有限请求成功；
+ * - 预约/计划状态流转用条件 UPDATE，已被处理的请求返回 0 并整体回滚；
+ * - 退款幂等（{@link PointsService#refundByRef}），不会重复退款；
+ * - 锁顺序统一：商品行 → 用户行，失败请求不产生订单、预约、积分流水或库存变更。
  */
 @Service
 public class RedemptionQueueService {
@@ -43,7 +50,7 @@ public class RedemptionQueueService {
     }
 
     /**
-     * 预约排队：库存不足时冻结积分（支持家庭共享），按预约时间先后排队。
+     * 预约排队：商品行锁内确认缺货后冻结积分（支持家庭共享）排队。
      * 返回位次、预计到货时间与替代商品建议。
      */
     @Transactional
@@ -51,7 +58,10 @@ public class RedemptionQueueService {
         if (quantity <= 0) {
             throw ApiException.badRequest("数量必须大于 0");
         }
-        Product product = redemptionService.checkProductAvailable(productId);
+        // 先取商品行锁，再在锁内判断库存，避免与兑换/到货并发时读到过期库存
+        Product product = productRepo.findByIdForUpdate(productId)
+                .orElseThrow(() -> ApiException.notFound("商品不存在"));
+        redemptionService.checkProductAvailable(productId);
         if (product.getStock() >= quantity) {
             throw ApiException.conflict("当前库存充足，请直接兑换，无需排队");
         }
@@ -67,7 +77,7 @@ public class RedemptionQueueService {
         reservation.setPointsReserved(totalPoints);
         reservation = reservationRepo.save(reservation);
 
-        // 冻结积分（本人 + 家庭共享）；不足则整体回滚
+        // 冻结积分（本人 + 家庭共享）；不足则抛异常整体回滚（含预约记录）
         int paid = pointsService.deductWithFamilyShare(user, totalPoints,
                 PointsTransaction.TxType.RESERVATION, PointsTransaction.TxType.RESERVATION_SHARE,
                 "RESERVATION", reservation.getId(), "预约排队 " + product.getName());
@@ -96,7 +106,8 @@ public class RedemptionQueueService {
     }
 
     /**
-     * 取消预约：WAITING 直接退；READY 取消需回补库存并重新分配给后续排队者。积分原路退回。
+     * 取消预约：条件流转保证只取消一次；READY 取消在商品行锁内回补库存并重排。
+     * 积分原路退回（幂等）。
      */
     @Transactional
     public RedemptionReservation cancel(Long id, AppUser operator) {
@@ -106,26 +117,31 @@ public class RedemptionQueueService {
         if (!owner && !staff) {
             throw ApiException.forbidden("只能取消自己的预约");
         }
-        if (r.getStatus() != RedemptionReservation.Status.WAITING
-                && r.getStatus() != RedemptionReservation.Status.READY) {
-            throw ApiException.conflict("当前状态不可取消: " + r.getStatus());
+        // 商品行锁串行化取消/分配/回滚
+        Product product = productRepo.findByIdForUpdate(r.getProduct().getId()).orElseThrow();
+        OffsetDateTime now = OffsetDateTime.now();
+        boolean wasReady;
+        if (reservationRepo.cancelIfReady(id, now) == 1) {
+            wasReady = true;
+        } else if (reservationRepo.cancelIfWaiting(id, now) == 1) {
+            wasReady = false;
+        } else {
+            throw ApiException.conflict("当前状态不可取消（可能已被领取或回滚）");
         }
-        boolean wasReady = r.getStatus() == RedemptionReservation.Status.READY;
-        r.setStatus(RedemptionReservation.Status.CANCELLED);
-        r.setCancelledAt(OffsetDateTime.now());
         pointsService.refundByRef("RESERVATION", r.getId(),
                 PointsTransaction.TxType.RESERVATION_REFUND, "预约取消，退回冻结积分");
-        RedemptionReservation saved = reservationRepo.save(r);
         if (wasReady) {
-            Product product = r.getProduct();
+            // 锁内回补库存并重新 FIFO 分配
             product.setStock(product.getStock() + r.getQuantity());
             productRepo.save(product);
             allocate(product);
         }
-        return saved;
+        r.setStatus(RedemptionReservation.Status.CANCELLED);
+        r.setCancelledAt(now);
+        return r;
     }
 
-    /** 实际领取（READY → FULFILLED），本人或物业核销。 */
+    /** 实际领取：条件流转（READY 且未过期），并发/重复领取只会成功一次。 */
     @Transactional
     public RedemptionReservation pickup(Long id, AppUser operator) {
         RedemptionReservation r = reservationRepo.findById(id).orElseThrow(() -> ApiException.notFound("预约不存在"));
@@ -134,19 +150,17 @@ public class RedemptionQueueService {
         if (!owner && !staff) {
             throw ApiException.forbidden("只能领取自己的预约");
         }
-        if (r.getStatus() != RedemptionReservation.Status.READY) {
-            throw ApiException.conflict("仅到货待领取状态可领取，当前: " + r.getStatus());
-        }
-        if (r.getExpireAt() != null && OffsetDateTime.now().isAfter(r.getExpireAt())) {
-            throw ApiException.conflict("已过领取截止时间，预约将自动回滚");
+        if (reservationRepo.fulfillIfReady(id, OffsetDateTime.now()) == 0) {
+            throw ApiException.conflict("仅到货待领取状态可领取（可能已领取、已取消或已过期回滚）");
         }
         r.setStatus(RedemptionReservation.Status.FULFILLED);
         r.setFulfilledAt(OffsetDateTime.now());
-        return reservationRepo.save(r);
+        return r;
     }
 
     /**
-     * 领取替代商品：消耗积分（扣替代品积分、减库存、生成已核销订单），原预约保留排队顺序。
+     * 领取替代商品：条件扣减替代品库存、消耗积分、生成已核销订单；
+     * 条件流转登记替代领取，原预约保留排队顺序。任何一步失败整体回滚。
      */
     @Transactional
     public Map<String, Object> altPickup(Long reservationId, Long altProductId, AppUser user) {
@@ -172,7 +186,11 @@ public class RedemptionQueueService {
         redemptionService.checkViolations(user);
         redemptionService.checkMonthlyLimits(user, alt, quantity);
 
-        // 替代商品直接核销领取
+        // 替代品库存条件扣减（权威闸门）
+        if (productRepo.tryDecrementStock(altProductId, quantity) == 0) {
+            throw ApiException.conflict("替代商品库存不足，当前商品已被兑完");
+        }
+
         int totalPoints = alt.getCostPoints() * quantity;
         RedemptionOrder order = new RedemptionOrder();
         order.setOrderNo("RA" + UUID.randomUUID().toString().replace("-", "").substring(0, 14).toUpperCase());
@@ -191,34 +209,34 @@ public class RedemptionQueueService {
         if (paid < totalPoints) {
             throw ApiException.conflict("积分不足，家庭共享后仍差 " + (totalPoints - paid) + " 分");
         }
-        alt.setStock(alt.getStock() - quantity);
-        productRepo.save(alt);
 
-        // 原预约保留排队顺序，仅记录替代领取信息
+        // 条件流转登记替代领取：并发重复领取只成功一次，失败整体回滚
+        if (reservationRepo.altPickupIfWaiting(reservationId, altProductId, order.getId(), OffsetDateTime.now()) == 0) {
+            throw ApiException.conflict("预约状态已变化或已领取过替代商品");
+        }
         r.setAltProduct(alt);
         r.setAltOrderId(order.getId());
         r.setAltFulfilledAt(OffsetDateTime.now());
-        reservationRepo.save(r);
 
         Map<String, Object> result = new LinkedHashMap<>(enrich(r));
         result.put("altOrder", order);
         return result;
     }
 
-    /** 供应商到货：入库并按排队顺序 FIFO 分配。 */
+    /** 供应商到货：条件流转防重复入库，商品行锁内入库并 FIFO 分配。 */
     @Transactional
     public RestockPlan arrive(Long planId, AppUser operator) {
         RestockPlan plan = restockPlanRepo.findById(planId).orElseThrow(() -> ApiException.notFound("补货计划不存在"));
-        if (plan.getStatus() != RestockPlan.Status.PLANNED) {
+        Product product = productRepo.findByIdForUpdate(plan.getProduct().getId()).orElseThrow();
+        if (restockPlanRepo.arriveIfPlanned(planId, OffsetDateTime.now()) == 0) {
             throw ApiException.conflict("该计划状态不可到货: " + plan.getStatus());
         }
-        plan.setStatus(RestockPlan.Status.ARRIVED);
-        plan.setArrivedAt(OffsetDateTime.now());
-        Product product = plan.getProduct();
         product.setStock(product.getStock() + plan.getQuantity());
         productRepo.save(product);
         allocate(product);
-        return restockPlanRepo.save(plan);
+        plan.setStatus(RestockPlan.Status.ARRIVED);
+        plan.setArrivedAt(OffsetDateTime.now());
+        return plan;
     }
 
     /** 创建补货/采购计划（高需求商品纳入下一次采购）。 */
@@ -245,7 +263,8 @@ public class RedemptionQueueService {
     }
 
     /**
-     * FIFO 分配：库存按预约时间顺序分配给排队者，分配到即进入 READY（限时领取）。
+     * FIFO 分配：调用方必须已持有该商品的行锁；锁内重读库存与等待队列，
+     * 按预约时间顺序分配，分配到即 READY（限时领取）。
      */
     private void allocate(Product product) {
         List<RedemptionReservation> waiting = reservationRepo
@@ -271,32 +290,45 @@ public class RedemptionQueueService {
     }
 
     /**
-     * 到期回滚：READY 超过领取期限的预约自动关闭、退回冻结积分、库存回补并重新分配。
-     * 定时执行，也可由工作人员手动触发，避免手工登记。
+     * 到期回滚：READY 超期的预约按商品逐个在行锁内条件关闭、退回冻结积分（幂等）、
+     * 库存回补并重新 FIFO 分配。定时执行，也可手动触发，避免手工登记。
      */
     @Transactional
     public int processExpiries() {
         OffsetDateTime now = OffsetDateTime.now();
         List<RedemptionReservation> expired = reservationRepo
                 .findByStatusAndExpireAtBefore(RedemptionReservation.Status.READY, now);
-        Set<Long> affectedProducts = new HashSet<>();
+        // 按商品分组、按商品 id 升序加锁，避免并发回滚/到货之间死锁
+        Map<Long, List<RedemptionReservation>> byProduct = new TreeMap<>();
         for (RedemptionReservation r : expired) {
-            r.setStatus(RedemptionReservation.Status.EXPIRED);
-            r.setCancelledAt(now);
-            reservationRepo.save(r);
-            Product product = r.getProduct();
-            product.setStock(product.getStock() + r.getQuantity());
-            productRepo.save(product);
-            pointsService.refundByRef("RESERVATION", r.getId(),
-                    PointsTransaction.TxType.RESERVATION_REFUND, "预约到期未领取，自动退回积分");
-            affectedProducts.add(product.getId());
-            log.info("预约到期回滚: 预约#{}（{} x{}）已退积分并释放库存", r.getId(),
-                    r.getUser().getDisplayName(), r.getQuantity());
+            byProduct.computeIfAbsent(r.getProduct().getId(), k -> new ArrayList<>()).add(r);
         }
-        for (Long productId : affectedProducts) {
-            productRepo.findById(productId).ifPresent(this::allocate);
+        int count = 0;
+        for (Map.Entry<Long, List<RedemptionReservation>> entry : byProduct.entrySet()) {
+            Product product = productRepo.findByIdForUpdate(entry.getKey()).orElse(null);
+            if (product == null) {
+                continue;
+            }
+            int released = 0;
+            for (RedemptionReservation r : entry.getValue()) {
+                // 条件流转：已被领取/取消的跳过，保证不重复退款
+                if (reservationRepo.expireIfReady(r.getId(), now) == 0) {
+                    continue;
+                }
+                released += r.getQuantity();
+                pointsService.refundByRef("RESERVATION", r.getId(),
+                        PointsTransaction.TxType.RESERVATION_REFUND, "预约到期未领取，自动退回积分");
+                count++;
+                log.info("预约到期回滚: 预约#{}（{} x{}）已退积分并释放库存", r.getId(),
+                        r.getUser().getDisplayName(), r.getQuantity());
+            }
+            if (released > 0) {
+                product.setStock(product.getStock() + released);
+                productRepo.save(product);
+                allocate(product);
+            }
         }
-        return expired.size();
+        return count;
     }
 
     @Scheduled(fixedDelayString = "${app.rules.watchdog-delay-ms:60000}", initialDelay = 45000)
