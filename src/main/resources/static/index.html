@@ -50,9 +50,9 @@
 let token = localStorage.getItem('token') || '';
 let me = JSON.parse(localStorage.getItem('me') || 'null');
 const TABS = [
-  ['disposal','投放登记'], ['review','复核任务'], ['mall','积分商城'], ['points','我的积分'],
-  ['events','事件中心'], ['collection','清运'], ['appeal','申诉'], ['campaign','宣传活动'],
-  ['report','月度报告'], ['policy','政策对比']
+  ['disposal','投放登记'], ['review','复核任务'], ['mall','积分商城'], ['queue','排队补货'],
+  ['points','我的积分'], ['events','事件中心'], ['collection','清运'], ['appeal','申诉'],
+  ['campaign','宣传活动'], ['report','月度报告'], ['policy','政策对比']
 ];
 const $ = s => document.querySelector(s);
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -131,7 +131,9 @@ const tag = (t, cls='') => `<span class="tag ${cls}">${t}</span>`;
 const stTag = s => ({PENDING:tag('待处理','orange'), CONFIRMED:tag('已确认','red'), REJECTED:tag('已驳回','blue'),
   OPEN:tag('未处理','red'), ACKNOWLEDGED:tag('处理中','orange'), RESOLVED:tag('已解决'),
   FULFILLED:tag('已核销'), CANCELLED:tag('已取消','blue'), APPROVED:tag('已通过'),
-  RECORDED:tag('已记录'), UNDER_REVIEW:tag('复核中','orange')}[s] || tag(s));
+  RECORDED:tag('已记录'), UNDER_REVIEW:tag('复核中','orange'),
+  WAITING:tag('排队中','orange'), READY:tag('到货待领'), EXPIRED:tag('已过期回滚','red'),
+  PLANNED:tag('在途','blue'), ARRIVED:tag('已到货')}[s] || tag(s));
 
 const VIEWS = {
 async disposal() {
@@ -185,7 +187,9 @@ async mall() {
     ${products.map(p=>`<tr><td>${esc(p.name)}</td><td>${p.category==='SERVICE'?'社区服务':'实物'}</td><td>${p.costPoints}</td>
       <td>${p.stock}</td><td>${p.perUserMonthlyLimit}/${p.perFamilyMonthlyLimit}</td>
       <td>${p.validTo?p.validTo.slice(0,10):'长期'} ${p.expired?tag('已过期','red'):''}</td>
-      <td><button class="act sm" onclick="redeem(${p.id},'${esc(p.name)}')">兑换</button></td></tr>`).join('')}
+      <td>${p.stock>0
+        ? `<button class="act sm" onclick="redeem(${p.id},'${esc(p.name)}')">兑换</button>`
+        : `<button class="act sm" style="background:#ef6c00" onclick="joinQueue(${p.id},'${esc(p.name)}')">预约排队</button>`}</td></tr>`).join('')}
     </table></div>
   ${pending.length?`<div class="card"><h2>待核销订单（物业）</h2><table><tr><th>单号</th><th>居民</th><th>商品</th><th>数量</th><th>积分</th><th></th></tr>
     ${pending.map(o=>`<tr><td>${o.orderNo}</td><td>${esc(o.userName)}</td><td>${esc(o.productName)}</td><td>${o.quantity}</td>
@@ -194,6 +198,50 @@ async mall() {
     ${orders.map(o=>`<tr><td>${o.orderNo}</td><td>${esc(o.productName)}</td><td>${o.quantity}</td><td>${o.pointsSpent}</td>
       <td>${stTag(o.status)}</td><td>${o.status==='PENDING'?`<button class="act sm gray" onclick="cancelOrder(${o.id})">取消</button>`:''}</td></tr>`).join('') || '<tr><td colspan=6 class=muted>暂无兑换</td></tr>'}
     </table></div>`;
+},
+async queue() {
+  const mine = await api('/queue/mine');
+  const staff = ['PROPERTY','GOVERNANCE','ADMIN'].includes(me.role);
+  let staffHtml = '';
+  if (staff) {
+    const [queue, suggestions, plans, products] = await Promise.all([
+      api('/queue'), api('/queue/suggestions'), api('/restock-plans'), api('/products?all=true')]);
+    staffHtml = `<div class="card"><h2>排队总览（工作人员）</h2>
+      <table><tr><th>#</th><th>居民</th><th>商品</th><th>数量</th><th>冻结积分</th><th>位次</th><th>预约时间</th></tr>
+      ${queue.map(q=>`<tr><td>${q.reservation.id}</td><td>${esc(q.reservation.userName)}</td>
+        <td>${esc(q.reservation.productName)}</td><td>${q.reservation.quantity}</td>
+        <td>${q.reservation.pointsReserved}</td><td>${q.position||'-'}</td><td>${q.reservation.createdAt}</td></tr>`).join('') || '<tr><td colspan=7 class=muted>暂无排队</td></tr>'}
+      </table></div>
+    <div class="card"><h2>采购建议（高需求商品纳入下一次采购计划）</h2>
+      <table><tr><th>商品</th><th>排队人数</th><th>排队数量</th><th>当前库存</th><th>在途补货</th><th>建议采购</th><th>最近预计到货</th></tr>
+      ${suggestions.map(s=>`<tr><td>${esc(s.productName)}</td><td>${s.waitingReservations}</td><td>${s.waitingQuantity}</td>
+        <td>${s.currentStock}</td><td>${s.plannedRestock}</td><td><b>${s.suggestedPurchase}</b></td>
+        <td>${s.nextExpectedAt?s.nextExpectedAt.slice(0,10):'-'}</td></tr>`).join('') || '<tr><td colspan=7 class=muted>暂无排队需求</td></tr>'}
+      </table></div>
+    <div class="card"><h2>补货/采购计划</h2>
+      <div class="row">
+        <select id="rp-product">${products.map(p=>`<option value="${p.id}">${esc(p.name)}(库存${p.stock})</option>`).join('')}</select>
+        <input id="rp-qty" type="number" min="1" value="10" style="width:80px">
+        <input id="rp-time" type="datetime-local">
+        <button class="act" onclick="createPlan()">纳入采购计划</button>
+        <button class="act gray" onclick="processExpiries()">处理到期回滚</button>
+      </div>
+      <table><tr><th>#</th><th>商品</th><th>数量</th><th>预计到货</th><th>状态</th><th>操作</th></tr>
+      ${plans.map(p=>`<tr><td>${p.id}</td><td>${esc(p.productName)}</td><td>${p.quantity}</td>
+        <td>${p.expectedAt}</td><td>${stTag(p.status)||p.status}</td>
+        <td>${p.status==='PLANNED'?`<button class="act sm" onclick="planArrive(${p.id})">到货入库</button>`:''}</td></tr>`).join('') || '<tr><td colspan=6 class=muted>暂无计划</td></tr>'}
+      </table></div>`;
+  }
+  $('#main').innerHTML = `<div class="card"><h2>我的兑换预约</h2>
+    <table><tr><th>#</th><th>商品</th><th>数量</th><th>冻结积分</th><th>状态</th><th>位次/到货</th><th>替代商品</th><th>操作</th></tr>
+    ${mine.map(q=>{const r=q.reservation;return `<tr><td>${r.id}</td><td>${esc(r.productName)}</td><td>${r.quantity}</td>
+      <td>${r.pointsReserved}</td><td>${stTag(r.status)||r.status}</td>
+      <td>${q.position?('第'+q.position+'位'):''} ${q.estimatedArrival?('预计'+q.estimatedArrival.slice(0,10)):''}${r.expireAt&&r.status==='READY'?('<br>领取截止 '+r.expireAt.slice(0,16)):''}</td>
+      <td>${(q.alternatives||[]).map(a=>`${esc(a.name)}(${a.costPoints}分) <button class="act sm" onclick="altPickup(${r.id},${a.id})">领替代</button>`).join('<br>')||'-'}</td>
+      <td>${r.status==='READY'?`<button class="act sm" onclick="pickupQueue(${r.id})">领取</button>`:''}
+          ${(r.status==='WAITING'||r.status==='READY')?`<button class="act sm gray" onclick="cancelQueue(${r.id})">取消</button>`:''}
+          ${r.altFulfilledAt?tag('已领替代','blue'):''}</td></tr>`;}).join('') || '<tr><td colspan=8 class=muted>暂无预约</td></tr>'}
+    </table></div>${staffHtml}`;
 },
 async points() {
   const [p, txs, violations] = await Promise.all([api('/points/me'), api('/points/transactions'), api('/points/violations')]);
@@ -322,6 +370,28 @@ async function redeem(id, name) {
 }
 async function fulfill(id) { try { await api(`/redemptions/${id}/fulfill`, {method:'POST'}); toast('已核销'); VIEWS.mall(); } catch(e){ toast(e.message,true);} }
 async function cancelOrder(id) { try { await api(`/redemptions/${id}/cancel`, {method:'POST'}); toast('已取消并退回积分'); VIEWS.mall(); } catch(e){ toast(e.message,true);} }
+async function joinQueue(pid, name) {
+  try {
+    const r = await api('/queue', {method:'POST', body: JSON.stringify({productId:pid, quantity:1})});
+    toast(`已预约 ${name}，当前第 ${r.position||'-'} 位` + (r.estimatedArrival?`，预计到货 ${r.estimatedArrival.slice(0,10)}`:''));
+    go('queue');
+  } catch(e){ toast(e.message,true); }
+}
+async function pickupQueue(id) { try { await api(`/queue/${id}/pickup`, {method:'POST'}); toast('已领取'); VIEWS.queue(); } catch(e){ toast(e.message,true);} }
+async function cancelQueue(id) { try { await api(`/queue/${id}/cancel`, {method:'POST'}); toast('已取消预约并退回积分'); VIEWS.queue(); } catch(e){ toast(e.message,true);} }
+async function altPickup(id, altId) {
+  try { await api(`/queue/${id}/alt-pickup`, {method:'POST', body: JSON.stringify({altProductId:altId})}); toast('替代商品已领取（原预约保留排队）'); VIEWS.queue(); }
+  catch(e){ toast(e.message,true); }
+}
+async function createPlan() {
+  try {
+    await api('/restock-plans', {method:'POST', body: JSON.stringify({
+      productId:+$('#rp-product').value, quantity:+$('#rp-qty').value, expectedAt:$('#rp-time').value+':00+08:00'})});
+    toast('已纳入采购计划'); VIEWS.queue();
+  } catch(e){ toast(e.message,true); }
+}
+async function planArrive(id) { try { await api(`/restock-plans/${id}/arrive`, {method:'POST'}); toast('已到货入库，排队已自动分配'); VIEWS.queue(); } catch(e){ toast(e.message,true);} }
+async function processExpiries() { try { const r = await api('/queue/process-expiries', {method:'POST'}); toast(`已回滚 ${r.expired} 个到期预约`); VIEWS.queue(); } catch(e){ toast(e.message,true);} }
 async function resolveEvent(id) { try { await api(`/events/${id}/resolve`, {method:'POST'}); toast('事件已办结'); VIEWS.events(); } catch(e){ toast(e.message,true);} }
 async function runCheck() { try { const r = await api('/events/check', {method:'POST'}); toast(`巡检完成，新事件 ${r.length} 个`); VIEWS.events(); } catch(e){ toast(e.message,true);} }
 async function scheduleCollection() {

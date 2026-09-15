@@ -1,6 +1,6 @@
 # 城市垃圾分类驿站 · 积分兑换与误投追踪服务
 
-基于 **Java 17 + Spring Boot 3 + PostgreSQL 16** 的社区垃圾分类治理服务：覆盖居民投放登记、摄像/督导误投识别与复核、积分增减与教育提醒、积分商城兑换（库存/限购/家庭共享/违规拦截）、桶点事件多方联动、清运称重异常、申诉处理、宣传活动、月度治理报告与政策前后对比。
+基于 **Java 17 + Spring Boot 3 + PostgreSQL 16** 的社区垃圾分类治理服务：覆盖居民投放登记、摄像/督导误投识别与复核、积分增减与教育提醒、积分商城兑换（库存/限购/家庭共享/违规拦截）、**兑换库存联动（缺货预约排队、到货自动分配、到期回滚、替代商品、采购计划）**、桶点事件多方联动、清运称重异常、申诉处理、宣传活动、月度治理报告与政策前后对比。
 
 ## 原始需求
 
@@ -46,6 +46,7 @@ docker compose up -d --build
 1. **投放登记**：`POST /api/disposals`（居民扫码；督导员传 `userId` 即代录；`detectedIssues` 模拟摄像头识别塑料袋混入厨余/电池混入其他垃圾/纸箱未压扁/餐盒未清洗 → 自动生成复核任务；`obviousMissort=true` 冻结积分待复核）
 2. **复核**：`GET /api/review-tasks` → `POST /api/review-tasks/{id}/complete`（确认误投：首次→教育提醒，再次→扣分；判定误报：补发积分）
 3. **兑换**：`POST /api/redemptions`（校验库存、个人/家庭月度限购、90 天违规拦截；本人积分不足时家庭成员共享代付）；物业 `POST /api/redemptions/{id}/fulfill` 核销
+3.1 **兑换库存联动（排队）**：库存不足时 `POST /api/queue` 预约排队（冻结积分，返回位次/预计到货/替代商品）；`POST /api/restock-plans` 纳入采购计划 → `POST /api/restock-plans/{id}/arrive` 到货自动按序分配；`POST /api/queue/{id}/pickup` 实际领取；到期未领自动回滚退积分（定时任务 + `POST /api/queue/process-expiries` 手动触发）；`POST /api/queue/{id}/alt-pickup` 领取替代商品（消耗积分、原预约保留排队）；`GET /api/queue/suggestions` 高需求商品采购建议
 4. **事件联动**：`POST /api/events/check` 手动巡检（复核超时、清运车迟到、楼栋误投率升高），满溢可人工 `POST /api/bucket-points/{id}/overflow` 或投放累计超容量自动触发；事件自动挂接居民/督导/物业/清运/治理人员
 5. **清运**：`POST /api/collections/schedule` 排班 → `POST /api/collections/{id}/arrive` 称重（与应收重量偏差 >20% 标记异常并生成事件）
 6. **申诉**：居民 `POST /api/appeals` → 治理人员 `POST /api/appeals/{id}/handle`（通过则返还扣分）

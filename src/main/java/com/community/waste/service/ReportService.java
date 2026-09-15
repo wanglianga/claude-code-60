@@ -29,11 +29,13 @@ public class ReportService {
     private final CampaignSignupRepo signupRepo;
     private final BuildingRepo buildingRepo;
     private final AppUserRepo userRepo;
+    private final RedemptionReservationRepo reservationRepo;
 
     public ReportService(DisposalRecordRepo disposalRepo, PointsTransactionRepo txRepo,
                          RedemptionOrderRepo orderRepo, ViolationRepo violationRepo,
                          CollectionRecordRepo collectionRepo, CampaignRepo campaignRepo,
-                         CampaignSignupRepo signupRepo, BuildingRepo buildingRepo, AppUserRepo userRepo) {
+                         CampaignSignupRepo signupRepo, BuildingRepo buildingRepo, AppUserRepo userRepo,
+                         RedemptionReservationRepo reservationRepo) {
         this.disposalRepo = disposalRepo;
         this.txRepo = txRepo;
         this.orderRepo = orderRepo;
@@ -43,6 +45,7 @@ public class ReportService {
         this.signupRepo = signupRepo;
         this.buildingRepo = buildingRepo;
         this.userRepo = userRepo;
+        this.reservationRepo = reservationRepo;
     }
 
     @Transactional(readOnly = true)
@@ -113,6 +116,16 @@ public class ReportService {
         redemption.put("orderCount", orderRepo.countByCreatedAtBetween(from, to));
         redemption.put("pointsCost", orderRepo.sumPointsSpentByRange(from, to));
         report.put("redemption", redemption);
+
+        // 预约排队联动
+        Map<String, Object> queue = new LinkedHashMap<>();
+        queue.put("waiting", reservationRepo.countByStatus(RedemptionReservation.Status.WAITING));
+        queue.put("ready", reservationRepo.countByStatus(RedemptionReservation.Status.READY));
+        queue.put("fulfilled", reservationRepo.countByStatusAndFulfilledAtBetween(
+                RedemptionReservation.Status.FULFILLED, from, to));
+        queue.put("expired", reservationRepo.countByStatusAndCancelledAtBetween(
+                RedemptionReservation.Status.EXPIRED, from, to));
+        report.put("redemptionQueue", queue);
 
         // 清运
         List<CollectionRecord> collections = collectionRepo.findByScheduledAtBetween(from, to);

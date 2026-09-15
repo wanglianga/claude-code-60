@@ -68,6 +68,8 @@ app:
     redeem-violation-days: 90
     # 清运称重异常偏差阈值
     weigh-anomaly-ratio: 0.2
+    # 预约到货后的领取窗口（分钟），超时自动回滚
+    reservation-pickup-minutes: 4320
     # 定时巡检间隔（毫秒）
     watchdog-delay-ms: 60000
 

@@ -69,6 +69,8 @@ public class AppProperties {
         private int redeemViolationDays = 90;
         private double weighAnomalyRatio = 0.2;
         private long watchdogDelayMs = 60000;
+        /** 预约到货后的领取窗口（分钟），超时自动回滚 */
+        private int reservationPickupMinutes = 4320;
 
         public double getMissortRateThreshold() {
             return missortRateThreshold;
@@ -124,6 +126,14 @@ public class AppProperties {
 
         public void setWatchdogDelayMs(long watchdogDelayMs) {
             this.watchdogDelayMs = watchdogDelayMs;
+        }
+
+        public int getReservationPickupMinutes() {
+            return reservationPickupMinutes;
+        }
+
+        public void setReservationPickupMinutes(int reservationPickupMinutes) {
+            this.reservationPickupMinutes = reservationPickupMinutes;
         }
     }
 

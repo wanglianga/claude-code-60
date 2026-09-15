@@ -35,13 +35,15 @@ public class DataInitializer implements ApplicationRunner {
     private final ReviewTaskRepo reviewTaskRepo;
     private final ViolationRepo violationRepo;
     private final CollectionRecordRepo collectionRepo;
+    private final RestockPlanRepo restockPlanRepo;
     private final PasswordEncoder passwordEncoder;
 
     public DataInitializer(BuildingRepo buildingRepo, FamilyRepo familyRepo, AppUserRepo userRepo,
                            BucketPointRepo bucketPointRepo, DisposalRecordRepo disposalRepo,
                            PointsTransactionRepo txRepo, ProductRepo productRepo, CampaignRepo campaignRepo,
                            PolicyRepo policyRepo, ReviewTaskRepo reviewTaskRepo, ViolationRepo violationRepo,
-                           CollectionRecordRepo collectionRepo, PasswordEncoder passwordEncoder) {
+                           CollectionRecordRepo collectionRepo, RestockPlanRepo restockPlanRepo,
+                           PasswordEncoder passwordEncoder) {
         this.buildingRepo = buildingRepo;
         this.familyRepo = familyRepo;
         this.userRepo = userRepo;
@@ -54,6 +56,7 @@ public class DataInitializer implements ApplicationRunner {
         this.reviewTaskRepo = reviewTaskRepo;
         this.violationRepo = violationRepo;
         this.collectionRepo = collectionRepo;
+        this.restockPlanRepo = restockPlanRepo;
         this.passwordEncoder = passwordEncoder;
     }
 
@@ -103,6 +106,18 @@ public class DataInitializer implements ApplicationRunner {
         product("分类垃圾袋(30只/卷)", Product.Category.GOODS, 50, 100, 5, 10, null);
         product("社区家政服务 1 小时", Product.Category.SERVICE, 500, 10, 1, 1, null);
         product("端午香囊(已过期)", Product.Category.GOODS, 30, 5, 3, 6, OffsetDateTime.now().minusDays(60));
+        // 洗衣液：标准装库存极低（演示缺货排队），补充装充足（替代商品）
+        Product detergent = product("蓝月亮洗衣液(标准装)", Product.Category.GOODS, 80, 2, 2, 4, null);
+        product("洗衣液补充装 500g", Product.Category.GOODS, 70, 30, 3, 6, null);
+
+        // 供应商补货计划（在途，用于排队页提示预计到货）
+        RestockPlan plan = new RestockPlan();
+        plan.setProduct(detergent);
+        plan.setQuantity(10);
+        plan.setExpectedAt(OffsetDateTime.now().plusDays(3));
+        plan.setNote("供应商每周三配送");
+        plan.setCreatedBy(admin);
+        restockPlanRepo.save(plan);
 
         // 宣传活动
         Campaign campaign = new Campaign();
@@ -251,8 +266,8 @@ public class DataInitializer implements ApplicationRunner {
         return bucketPointRepo.save(p);
     }
 
-    private void product(String name, Product.Category category, int cost, int stock,
-                         int userLimit, int familyLimit, OffsetDateTime validTo) {
+    private Product product(String name, Product.Category category, int cost, int stock,
+                            int userLimit, int familyLimit, OffsetDateTime validTo) {
         Product p = new Product();
         p.setName(name);
         p.setCategory(category);
@@ -262,7 +277,7 @@ public class DataInitializer implements ApplicationRunner {
         p.setPerFamilyMonthlyLimit(familyLimit);
         p.setValidFrom(OffsetDateTime.now().minusDays(90));
         p.setValidTo(validTo);
-        productRepo.save(p);
+        return productRepo.save(p);
     }
 
     private void policy(String name, Policy.Type type, String desc, LocalDate start, Building building, BucketPoint point) {

@@ -15,6 +15,9 @@ public class PointsTransaction {
         REVIEW_DEDUCT,      // 复核扣分
         REDEMPTION,         // 兑换消费
         REDEMPTION_SHARE,   // 家庭成员代付
+        RESERVATION,        // 预约排队冻结积分
+        RESERVATION_SHARE,  // 预约排队家庭代付
+        RESERVATION_REFUND, // 预约取消/到期回滚退款
         APPEAL_RESTORE,     // 申诉返还
         CAMPAIGN_REWARD,    // 宣传活动奖励
         ADJUST              // 人工调整
